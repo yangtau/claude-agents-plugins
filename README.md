@@ -14,7 +14,7 @@ In Claude Code, run the following commands:
 
 ```
 /plugin marketplace add yangtau/claude-cursor-plugin
-/plugin install cursor@cursor
+/plugin install cursor@cursor-agent-cc
 /reload-plugins
 ```
 
