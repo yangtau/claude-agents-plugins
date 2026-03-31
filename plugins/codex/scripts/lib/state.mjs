@@ -159,6 +159,12 @@ export function setConfig(cwd, key, value) {
   });
 }
 
+export function deleteConfigKey(cwd, key) {
+  return updateState(cwd, (state) => {
+    delete state.config[key];
+  });
+}
+
 export function getConfig(cwd) {
   return loadState(cwd).config;
 }

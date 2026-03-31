@@ -25,6 +25,7 @@ import { collectReviewContext, ensureGitRepository, resolveReviewTarget } from "
 import { binaryAvailable, terminateProcessTree } from "./lib/process.mjs";
 import { loadPromptTemplate, interpolateTemplate } from "./lib/prompts.mjs";
 import {
+  deleteConfigKey,
   generateJobId,
   getConfig,
   listJobs,
@@ -77,7 +78,8 @@ function printUsage() {
       "  node scripts/codex-companion.mjs setup [--enable-review-gate|--disable-review-gate] [--json]",
       "  node scripts/codex-companion.mjs review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>]",
       "  node scripts/codex-companion.mjs adversarial-review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [focus text]",
-      "  node scripts/codex-companion.mjs task [--background] [--write] [--resume-last|--resume|--fresh] [--model <model|spark>] [--effort <none|minimal|low|medium|high|xhigh>] [prompt]",
+      "  node scripts/codex-companion.mjs task [--wait|--background] [--write] [--resume-last|--resume|--fresh] [--model <model|spark>] [--effort <none|minimal|low|medium|high|xhigh>] [prompt]",
+      "  node scripts/codex-companion.mjs model [<model-id|spark>] [--clear] [--json]",
       "  node scripts/codex-companion.mjs status [job-id] [--all] [--json]",
       "  node scripts/codex-companion.mjs result [job-id] [--json]",
       "  node scripts/codex-companion.mjs cancel [job-id] [--json]"
@@ -122,6 +124,15 @@ function normalizeReasoningEffort(effort) {
     );
   }
   return normalized;
+}
+
+function getDefaultModelForWorkspace(workspaceRoot) {
+  const value = getConfig(workspaceRoot).defaultModel;
+  if (value == null) {
+    return null;
+  }
+  const normalized = String(value).trim();
+  return normalized || null;
 }
 
 function normalizeArgv(argv) {
@@ -704,7 +715,7 @@ async function handleReview(argv) {
 async function handleTask(argv) {
   const { options, positionals } = parseCommandInput(argv, {
     valueOptions: ["model", "effort", "cwd", "prompt-file"],
-    booleanOptions: ["json", "write", "resume-last", "resume", "fresh", "background"],
+    booleanOptions: ["json", "write", "resume-last", "resume", "fresh", "background", "wait"],
     aliasMap: {
       m: "model"
     }
@@ -712,7 +723,7 @@ async function handleTask(argv) {
 
   const cwd = resolveCommandCwd(options);
   const workspaceRoot = resolveCommandWorkspace(options);
-  const model = normalizeRequestedModel(options.model);
+  const model = normalizeRequestedModel(options.model ?? getDefaultModelForWorkspace(workspaceRoot));
   const effort = normalizeReasoningEffort(options.effort);
   const prompt = readTaskPrompt(cwd, options, positionals);
 
@@ -762,6 +773,80 @@ async function handleTask(argv) {
       }),
     { json: options.json }
   );
+}
+
+function handleModel(argv) {
+  const { options, positionals } = parseCommandInput(argv, {
+    valueOptions: ["cwd"],
+    booleanOptions: ["json", "clear"]
+  });
+
+  const workspaceRoot = resolveCommandWorkspace(options);
+
+  if (options.clear) {
+    deleteConfigKey(workspaceRoot, "defaultModel");
+    const payload = {
+      defaultModel: null,
+      cleared: true
+    };
+    const rendered =
+      "Cleared the workspace default model. Codex will use its own default until you set one with `/codex:model <model-id>`.\n";
+    outputCommandResult(payload, rendered, options.json);
+    return;
+  }
+
+  const requestedModel = positionals.join(" ").trim();
+  if (!requestedModel) {
+    const defaultModel = getDefaultModelForWorkspace(workspaceRoot);
+    const aliases = Array.from(MODEL_ALIASES.entries()).map(([alias, model]) => ({
+      alias,
+      model
+    }));
+    const payload = {
+      defaultModel,
+      aliases
+    };
+
+    if (options.json) {
+      outputResult(payload, true);
+      return;
+    }
+
+    const lines = ["## Codex Model Defaults", ""];
+    if (defaultModel) {
+      lines.push(
+        `Workspace default: **${defaultModel}** (used when \`--model\` is omitted on \`/codex:task\`).`
+      );
+    } else {
+      lines.push(
+        "No workspace default set. Run `/codex:model <model-id>` to choose one, or pass `--model` on each run."
+      );
+    }
+    lines.push("");
+    lines.push("Known aliases:");
+    for (const { alias, model } of aliases) {
+      lines.push(`- \`${alias}\` -> \`${model}\``);
+    }
+    lines.push("");
+    lines.push("Override for a single run:");
+    lines.push("  `/codex:task --model spark \"your prompt\"`");
+    outputResult(`${lines.join("\n")}\n`, false);
+    return;
+  }
+
+  const modelId = normalizeRequestedModel(requestedModel);
+  setConfig(workspaceRoot, "defaultModel", modelId);
+  const payload = {
+    defaultModel: modelId,
+    requestedModel
+  };
+  const rendered = [
+    `Set **${modelId}** as the default model for this workspace.`,
+    "",
+    "Future `/codex:task` runs use this model when `--model` is not specified.",
+    ""
+  ].join("\n");
+  outputCommandResult(payload, `${rendered}\n`, options.json);
 }
 
 async function handleTaskWorker(argv) {
@@ -979,6 +1064,9 @@ async function main() {
       break;
     case "task":
       await handleTask(argv);
+      break;
+    case "model":
+      handleModel(argv);
       break;
     case "task-worker":
       await handleTaskWorker(argv);

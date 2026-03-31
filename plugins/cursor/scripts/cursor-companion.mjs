@@ -14,8 +14,9 @@ import {
   renderTaskResult,
   renderReviewResult,
   renderStatusReport,
-  renderJobDetail,
+  renderJobStatusReport,
   renderCancelReport,
+  renderStoredJobResult,
 } from "./lib/render.mjs";
 import {
   generateJobId,
@@ -32,6 +33,9 @@ import { resolveWorkspaceRoot } from "./lib/workspace.mjs";
 
 const ROOT_DIR = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 const SESSION_ID_ENV = "CURSOR_COMPANION_SESSION_ID";
+const DEFAULT_STATUS_WAIT_TIMEOUT_MS = 240000;
+const DEFAULT_STATUS_POLL_INTERVAL_MS = 2000;
+const DEFAULT_MAX_STATUS_JOBS = 10;
 
 // ── Helpers ──
 
@@ -42,7 +46,7 @@ function printUsage() {
       "  cursor-companion setup [--json]",
       "  cursor-companion task [--background] [--write] [--model <model>] [--mode plan|ask] [prompt]",
       "  cursor-companion review [--model <model>] [focus text]",
-      "  cursor-companion status [job-id] [--all] [--json]",
+      "  cursor-companion status [job-id] [--wait] [--timeout-ms <ms>] [--all] [--json]",
       "  cursor-companion result [job-id] [--json]",
       "  cursor-companion model [<model-id>] [--clear] [--json]",
       "  cursor-companion cancel [job-id] [--json]",
@@ -84,6 +88,10 @@ function resolveCommandWorkspace(options = {}) {
 
 function nowIso() {
   return new Date().toISOString();
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function shorten(text, limit = 96) {
@@ -136,6 +144,185 @@ async function listCursorModels() {
     }
   }
   return models;
+}
+
+function isActiveJobStatus(status) {
+  return status === "queued" || status === "running";
+}
+
+function isFinishedJobStatus(status) {
+  return status === "completed" || status === "failed" || status === "cancelled";
+}
+
+function getCurrentSessionId(options = {}) {
+  return options.env?.[SESSION_ID_ENV] ?? process.env[SESSION_ID_ENV] ?? null;
+}
+
+function sortJobsNewestFirst(jobs) {
+  return [...jobs].sort((left, right) => {
+    const leftTs = Math.max(
+      Date.parse(left.completedAt ?? "") || 0,
+      Date.parse(left.startedAt ?? "") || 0
+    );
+    const rightTs = Math.max(
+      Date.parse(right.completedAt ?? "") || 0,
+      Date.parse(right.startedAt ?? "") || 0
+    );
+    return rightTs - leftTs || String(right.id ?? "").localeCompare(String(left.id ?? ""));
+  });
+}
+
+function filterJobsForCurrentSession(jobs, options = {}) {
+  const sessionId = getCurrentSessionId(options);
+  if (!sessionId) {
+    return jobs;
+  }
+  return jobs.filter((job) => job.sessionId === sessionId);
+}
+
+function formatElapsedDuration(startValue, endValue = null) {
+  const start = Date.parse(startValue ?? "");
+  if (!Number.isFinite(start)) {
+    return null;
+  }
+
+  const end = endValue ? Date.parse(endValue) : Date.now();
+  if (!Number.isFinite(end) || end < start) {
+    return null;
+  }
+
+  const totalSeconds = Math.max(0, Math.round((end - start) / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+
+  if (hours > 0) {
+    return `${hours}h ${minutes}m`;
+  }
+  if (minutes > 0) {
+    return `${minutes}m ${seconds}s`;
+  }
+  return `${seconds}s`;
+}
+
+function enrichJob(job) {
+  return {
+    ...job,
+    kindLabel: job.kind || "job",
+    elapsed: formatElapsedDuration(job.startedAt, job.completedAt ?? null),
+    duration: isFinishedJobStatus(job.status)
+      ? formatElapsedDuration(job.startedAt, job.completedAt ?? null)
+      : null,
+  };
+}
+
+function resolveJobReference(jobs, reference) {
+  if (!reference) {
+    return jobs[0] ?? null;
+  }
+
+  const exact = jobs.find((job) => job.id === reference);
+  if (exact) {
+    return exact;
+  }
+
+  const prefixMatches = jobs.filter((job) => job.id.startsWith(reference));
+  if (prefixMatches.length === 1) {
+    return prefixMatches[0];
+  }
+  if (prefixMatches.length > 1) {
+    throw new Error(`Job reference "${reference}" is ambiguous. Use a longer job id.`);
+  }
+  return null;
+}
+
+function buildStatusSnapshot(cwd, options = {}) {
+  const workspaceRoot = resolveWorkspaceRoot(cwd);
+  const sessionId = getCurrentSessionId(options);
+  const jobs = sortJobsNewestFirst(
+    options.all ? listJobs(workspaceRoot) : filterJobsForCurrentSession(listJobs(workspaceRoot), options)
+  );
+  const maxJobs = options.maxJobs ?? DEFAULT_MAX_STATUS_JOBS;
+
+  const running = jobs.filter((job) => isActiveJobStatus(job.status)).map((job) => enrichJob(job));
+  const latestFinishedRaw = jobs.find((job) => isFinishedJobStatus(job.status)) ?? null;
+  const latestFinished = latestFinishedRaw ? enrichJob(latestFinishedRaw) : null;
+  const recent = (options.all ? jobs : jobs.slice(0, maxJobs))
+    .filter((job) => isFinishedJobStatus(job.status) && job.id !== latestFinished?.id)
+    .map((job) => enrichJob(job));
+
+  return {
+    workspaceRoot,
+    scopeLabel: options.all ? "all jobs" : sessionId ? "current session" : "repository",
+    running,
+    latestFinished,
+    recent,
+  };
+}
+
+function buildSingleJobSnapshot(cwd, reference) {
+  const workspaceRoot = resolveWorkspaceRoot(cwd);
+  const jobs = sortJobsNewestFirst(listJobs(workspaceRoot));
+  const selected = resolveJobReference(jobs, reference);
+  if (!selected) {
+    throw new Error(`No job found for "${reference}". Run /cursor:status to inspect known jobs.`);
+  }
+
+  return {
+    workspaceRoot,
+    job: enrichJob(selected),
+  };
+}
+
+async function waitForSingleJobSnapshot(cwd, reference, options = {}) {
+  const timeoutMs = Math.max(0, Number(options.timeoutMs) || DEFAULT_STATUS_WAIT_TIMEOUT_MS);
+  const deadline = Date.now() + timeoutMs;
+  let snapshot = buildSingleJobSnapshot(cwd, reference);
+
+  while (isActiveJobStatus(snapshot.job.status) && Date.now() < deadline) {
+    await sleep(Math.min(DEFAULT_STATUS_POLL_INTERVAL_MS, Math.max(0, deadline - Date.now())));
+    snapshot = buildSingleJobSnapshot(cwd, reference);
+  }
+
+  const waitTimedOut = isActiveJobStatus(snapshot.job.status);
+  return {
+    ...snapshot,
+    waitTimedOut,
+    timeoutMs,
+    job: {
+      ...snapshot.job,
+      waitTimedOut,
+    },
+  };
+}
+
+function resolveResultJob(cwd, reference) {
+  const workspaceRoot = resolveWorkspaceRoot(cwd);
+  const jobs = sortJobsNewestFirst(
+    reference ? listJobs(workspaceRoot) : filterJobsForCurrentSession(listJobs(workspaceRoot))
+  );
+  const finishedJobs = jobs.filter((job) => isFinishedJobStatus(job.status));
+
+  if (reference) {
+    const selected = resolveJobReference(finishedJobs, reference);
+    if (selected) {
+      return { workspaceRoot, job: enrichJob(selected) };
+    }
+
+    const active = resolveJobReference(jobs.filter((job) => isActiveJobStatus(job.status)), reference);
+    if (active) {
+      throw new Error(`Job ${active.id} is still ${active.status}. Check /cursor:status and try again once it finishes.`);
+    }
+
+    throw new Error(`No finished job found for "${reference}". Run /cursor:status to inspect active jobs.`);
+  }
+
+  const selected = finishedJobs[0] ?? null;
+  if (!selected) {
+    throw new Error("No finished Cursor Agent jobs found for this repository yet.");
+  }
+
+  return { workspaceRoot, job: enrichJob(selected) };
 }
 
 // ── Setup ──
@@ -409,43 +596,31 @@ async function handleReview(argv) {
 
 // ── Status ──
 
-function handleStatus(argv) {
+async function handleStatus(argv) {
   const { options, positionals } = parseCommandInput(argv, {
-    valueOptions: ["cwd"],
-    booleanOptions: ["json", "all"],
+    valueOptions: ["cwd", "timeout-ms"],
+    booleanOptions: ["json", "all", "wait"],
   });
 
   const cwd = resolveCommandCwd(options);
-  const workspaceRoot = resolveCommandWorkspace(options);
   const reference = positionals[0] ?? "";
 
   if (reference) {
-    // Show single job
-    const jobs = listJobs(workspaceRoot);
-    const job = jobs.find((j) => j.id === reference);
-    if (!job) {
-      throw new Error(`Job not found: ${reference}`);
-    }
-    const stored = readJobFile(workspaceRoot, job.id);
-    outputResult(
-      options.json ? { job, stored } : renderJobDetail(job, stored),
-      options.json
-    );
+    const snapshot = options.wait
+      ? await waitForSingleJobSnapshot(cwd, reference, {
+          timeoutMs: options["timeout-ms"],
+        })
+      : buildSingleJobSnapshot(cwd, reference);
+    outputResult(options.json ? snapshot : renderJobStatusReport(snapshot.job), options.json);
     return;
   }
 
-  // List all jobs
-  let jobs = listJobs(workspaceRoot);
-  if (!options.all) {
-    const sessionId = process.env[SESSION_ID_ENV] ?? null;
-    if (sessionId) {
-      jobs = jobs.filter((j) => j.sessionId === sessionId);
-    }
-    // Show last 10 by default
-    jobs = jobs.slice(-10);
+  if (options.wait) {
+    throw new Error("`status --wait` requires a job id.");
   }
 
-  outputResult(options.json ? { jobs } : renderStatusReport(jobs), options.json);
+  const report = buildStatusSnapshot(cwd, { all: options.all });
+  outputResult(options.json ? report : renderStatusReport(report), options.json);
 }
 
 // ── Result ──
@@ -457,27 +632,10 @@ function handleResult(argv) {
   });
 
   const cwd = resolveCommandCwd(options);
-  const workspaceRoot = resolveCommandWorkspace(options);
   const reference = positionals[0] ?? "";
-
-  // Find the job
-  const jobs = listJobs(workspaceRoot);
-  let job;
-  if (reference) {
-    job = jobs.find((j) => j.id === reference);
-  } else {
-    // Find latest completed job
-    job = [...jobs].reverse().find((j) => j.status === "completed" || j.status === "failed");
-  }
-  if (!job) {
-    throw new Error(reference ? `Job not found: ${reference}` : "No completed jobs found.");
-  }
-
+  const { workspaceRoot, job } = resolveResultJob(cwd, reference);
   const stored = readJobFile(workspaceRoot, job.id);
-  outputResult(
-    options.json ? { job, stored } : renderJobDetail(job, stored),
-    options.json
-  );
+  outputResult(options.json ? { job, stored } : renderStoredJobResult(job, stored), options.json);
 }
 
 // ── Model (list + workspace default) ──
@@ -565,16 +723,10 @@ function handleCancel(argv) {
   const workspaceRoot = resolveCommandWorkspace(options);
   const reference = positionals[0] ?? "";
 
-  const jobs = listJobs(workspaceRoot);
-  let job;
-  if (reference) {
-    job = jobs.find((j) => j.id === reference);
-  } else {
-    // Find latest running job
-    job = [...jobs].reverse().find((j) => j.status === "running" || j.status === "queued");
-  }
+  const jobs = sortJobsNewestFirst(listJobs(workspaceRoot)).filter((job) => isActiveJobStatus(job.status));
+  const job = reference ? resolveJobReference(jobs, reference) : jobs[0] ?? null;
   if (!job) {
-    throw new Error(reference ? `Job not found: ${reference}` : "No active jobs to cancel.");
+    throw new Error(reference ? `No active job found for "${reference}".` : "No active jobs to cancel.");
   }
 
   // Kill the process
@@ -583,7 +735,7 @@ function handleCancel(argv) {
   }
 
   const cancelledJob = {
-    ...job,
+    ...enrichJob(job),
     status: "cancelled",
     completedAt: nowIso(),
     errorMessage: "Cancelled by user.",
@@ -623,7 +775,7 @@ async function main() {
       await handleReview(argv);
       break;
     case "status":
-      handleStatus(argv);
+      await handleStatus(argv);
       break;
     case "result":
       handleResult(argv);
