@@ -1,0 +1,21 @@
+{
+  "name": "cursor-companion",
+  "owner": {
+    "name": "yangtau"
+  },
+  "metadata": {
+    "description": "Cursor Agent plugin for Claude Code — delegate coding tasks and reviews.",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "cursor",
+      "description": "Use Cursor Agent from Claude Code to delegate coding tasks and reviews.",
+      "version": "0.1.0",
+      "author": {
+        "name": "yangtau"
+      },
+      "source": "./plugins/cursor"
+    }
+  ]
+}

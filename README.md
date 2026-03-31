@@ -1,4 +1,4 @@
-# cursor — Claude Code Plugin
+# Cursor Companion — Claude Code Plugin
 
 A Claude Code plugin that wraps [cursor-agent](https://cursor.com) CLI, enabling you to delegate coding tasks, code reviews, and investigations to Cursor Agent directly from Claude Code.
 
@@ -6,16 +6,23 @@ A Claude Code plugin that wraps [cursor-agent](https://cursor.com) CLI, enabling
 
 - [Claude Code](https://claude.ai/code) CLI installed
 - [cursor-agent](https://cursor.com) CLI installed and authenticated (`cursor-agent login`)
+- Node.js 18.18 or later
 
 ## Installation
 
-In Claude Code, run:
+In Claude Code, run the following commands:
 
 ```
-/plugin github:yangtau/claude-cursor-plugin
+/plugin marketplace add yangtau/claude-cursor-plugin
+/plugin install cursor@cursor-companion
+/reload-plugins
 ```
 
-Then run `/reload-plugins` to activate. Verify with `/cursor:setup`.
+Verify with:
+
+```
+/cursor:setup
+```
 
 ## Commands
 
@@ -52,24 +59,20 @@ Then run `/reload-plugins` to activate. Verify with `/cursor:setup`.
 
 The plugin includes a **cursor-rescue** subagent that Claude Code can invoke proactively when it gets stuck on a complex debugging or implementation task. This works automatically — no manual invocation needed.
 
-You can also trigger it explicitly:
-
-```bash
-/cursor:rescue "investigate why the auth middleware returns 403 on valid tokens"
-```
-
 ## Architecture
 
 ```
-.claude-plugin/plugin.json    Plugin manifest
-commands/                     7 slash commands (setup, task, review, models, status, result, cancel)
-agents/cursor-rescue.md       Auto-delegation subagent
-skills/cursor-cli-runtime/    Internal runtime contract
-hooks/hooks.json              Session lifecycle hooks
-scripts/
-  cursor-companion.mjs        Main script wrapping cursor-agent -p (headless mode)
-  session-lifecycle-hook.mjs  Session start/end handler
-  lib/                        Shared modules (state, args, cursor, render, etc.)
+.claude-plugin/marketplace.json     Marketplace registry
+plugins/cursor/
+  .claude-plugin/plugin.json        Plugin manifest
+  commands/                         7 slash commands (setup, task, review, models, status, result, cancel)
+  agents/cursor-rescue.md           Auto-delegation subagent
+  skills/cursor-cli-runtime/        Internal runtime contract
+  hooks/hooks.json                  Session lifecycle hooks
+  scripts/
+    cursor-companion.mjs            Main script wrapping cursor-agent -p (headless mode)
+    session-lifecycle-hook.mjs      Session start/end handler
+    lib/                            Shared modules (state, args, cursor, render, etc.)
 ```
 
 ## How it works
