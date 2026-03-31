@@ -1,4 +1,4 @@
-# Cursor Companion — Claude Code Plugin
+# Cursor — Claude Code Plugin
 
 A Claude Code plugin that wraps [cursor-agent](https://cursor.com) CLI, enabling you to delegate coding tasks, code reviews, and investigations to Cursor Agent directly from Claude Code.
 
@@ -14,7 +14,7 @@ In Claude Code, run the following commands:
 
 ```
 /plugin marketplace add yangtau/claude-cursor-plugin
-/plugin install cursor@cursor-companion
+/plugin install cursor@cursor
 /reload-plugins
 ```
 
