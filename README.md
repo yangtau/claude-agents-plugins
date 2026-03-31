@@ -9,15 +9,13 @@ A Claude Code plugin that wraps [cursor-agent](https://cursor.com) CLI, enabling
 
 ## Installation
 
-```bash
-# From local path
-/install /path/to/claude-cursor-plugin
+In Claude Code, run:
 
-# Or from GitHub
-/install github:<user>/claude-cursor-plugin
+```
+/install github:yangtau/claude-cursor-plugin
 ```
 
-Then run `/reload-plugins` to activate.
+Then run `/reload-plugins` to activate. Verify with `/cursor:setup`.
 
 ## Commands
 
