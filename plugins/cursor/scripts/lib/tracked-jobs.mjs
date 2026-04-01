@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import process from "node:process";
 
-import { readJobFile, resolveJobFile, resolveJobLogFile, upsertJob, writeJobFile } from "./state.mjs";
+import { JOB_SOURCE, readJobFile, resolveJobFile, resolveJobLogFile, upsertJob, writeJobFile } from "./state.mjs";
 
 export const SESSION_ID_ENV = "CURSOR_COMPANION_SESSION_ID";
 
@@ -14,6 +14,7 @@ function normalizeProgressEvent(value) {
     return {
       message: String(value.message ?? "").trim(),
       phase: typeof value.phase === "string" && value.phase.trim() ? value.phase.trim() : null,
+      chatId: typeof value.chatId === "string" && value.chatId.trim() ? value.chatId.trim() : null,
       stderrMessage: value.stderrMessage == null ? null : String(value.stderrMessage).trim(),
       logTitle: typeof value.logTitle === "string" && value.logTitle.trim() ? value.logTitle.trim() : null,
       logBody: value.logBody == null ? null : String(value.logBody).trimEnd()
@@ -23,6 +24,7 @@ function normalizeProgressEvent(value) {
   return {
     message: String(value ?? "").trim(),
     phase: null,
+    chatId: null,
     stderrMessage: String(value ?? "").trim(),
     logTitle: null,
     logBody: null
@@ -58,6 +60,7 @@ export function createJobRecord(base, options = {}) {
   const sessionId = env[options.sessionIdEnv ?? SESSION_ID_ENV];
   return {
     ...base,
+    source: options.source ?? base.source ?? JOB_SOURCE,
     createdAt: nowIso(),
     ...(sessionId ? { sessionId } : {})
   };
@@ -65,6 +68,7 @@ export function createJobRecord(base, options = {}) {
 
 export function createJobProgressUpdater(workspaceRoot, jobId) {
   let lastPhase = null;
+  let lastChatId = null;
 
   return (event) => {
     const normalized = normalizeProgressEvent(event);
@@ -74,6 +78,12 @@ export function createJobProgressUpdater(workspaceRoot, jobId) {
     if (normalized.phase && normalized.phase !== lastPhase) {
       lastPhase = normalized.phase;
       patch.phase = normalized.phase;
+      changed = true;
+    }
+
+    if (normalized.chatId && normalized.chatId !== lastChatId) {
+      lastChatId = normalized.chatId;
+      patch.chatId = normalized.chatId;
       changed = true;
     }
 
@@ -140,6 +150,7 @@ export async function runTrackedJob(job, runner, options = {}) {
     writeJobFile(job.workspaceRoot, job.id, {
       ...runningRecord,
       status: completionStatus,
+      chatId: execution.chatId ?? null,
       pid: null,
       phase: completionStatus === "completed" ? "done" : "failed",
       completedAt,
@@ -149,6 +160,7 @@ export async function runTrackedJob(job, runner, options = {}) {
     upsertJob(job.workspaceRoot, {
       id: job.id,
       status: completionStatus,
+      chatId: execution.chatId ?? null,
       summary: execution.summary,
       phase: completionStatus === "completed" ? "done" : "failed",
       pid: null,

@@ -37,7 +37,7 @@ Verify with:
 | Command | Description |
 |---|---|
 | `/cursor:setup` | Check cursor-agent availability and auth status |
-| `/cursor:task <prompt>` | Delegate a coding task to Cursor Agent |
+| `/cursor:rescue <prompt>` | Delegate investigation, fixes, or follow-up rescue work to Cursor Agent |
 | `/cursor:review [focus]` | Run a code review using Cursor Agent |
 | `/cursor:model` | List models, or set the workspace default model (`/cursor:model <id>`; `--clear` to reset) |
 | `/cursor:status [job-id]` | Show active and recent jobs |
@@ -45,26 +45,23 @@ Verify with:
 | `/cursor:cancel [job-id]` | Cancel a running background job |
 | `/cursor:execute-plan [path]` | Execute a Claude Code plan using Cursor Agent |
 
-### Cursor Task Examples
+### Cursor Rescue Examples
 
 ```bash
-# Basic task
-/cursor:task "refactor the auth module to use JWT"
+# Basic rescue request
+/cursor:rescue "refactor the auth module to use JWT"
 
 # With a specific model (overrides workspace default for this run only)
-/cursor:task --model grok-4-20 "add error handling to the API layer"
+/cursor:rescue --model grok-4-20 "add error handling to the API layer"
 
-# Set default model for this workspace (then omit --model on tasks)
+# Set default model for this workspace (then omit --model on rescue runs)
 /cursor:model grok-4-20
 
-# Write mode (allows file edits)
-/cursor:task --write "fix the failing tests in src/utils"
+# Continue the previous rescue thread
+/cursor:rescue --resume "continue the previous task"
 
 # Run in background
-/cursor:task --background --write "migrate the database schema"
-
-# Read-only planning
-/cursor:task --mode plan "design the caching strategy"
+/cursor:rescue --background "migrate the database schema"
 
 # Execute a Claude Code plan (auto-detects latest plan in ~/.claude/plans/)
 /cursor:execute-plan
@@ -79,31 +76,32 @@ Verify with:
 | Command | Description |
 |---|---|
 | `/codex:setup` | Check Codex availability and auth status |
-| `/codex:rescue <prompt>` | Delegate a task to the Codex rescue subagent |
+| `/codex:rescue <prompt>` | Delegate investigation, fixes, or follow-up rescue work to the Codex rescue subagent |
 | `/codex:review` | Run a code review using Codex |
 | `/codex:adversarial-review [focus]` | Run an adversarial code review using Codex |
+| `/codex:model` | List models, or set the workspace default model (`/codex:model <id>`; `--clear` to reset) |
 | `/codex:status [job-id]` | Show active and recent jobs |
 | `/codex:result [job-id]` | Show output of a completed job |
 | `/codex:cancel [job-id]` | Cancel a running background job |
 | `/codex:execute-plan [path]` | Execute a Claude Code plan using Codex |
 
-### Codex Task Examples
+### Codex Rescue Examples
 
 ```bash
-# Basic rescue task
-/codex:rescue "fix the failing tests in the auth module"
+# Basic rescue request
+/codex:rescue "refactor the auth module to use JWT"
 
-# With a specific model
+# With a specific model (overrides workspace default for this run only)
 /codex:rescue --model gpt-5.3-codex-spark "optimize the database queries"
+
+# Set default model for this workspace (then omit --model on rescue runs)
+/codex:model spark
 
 # With reasoning effort level
 /codex:rescue --effort high "design a new caching layer"
 
-# Write mode (allows file edits)
-/codex:rescue --write "refactor the utils module"
-
 # Run in background
-/codex:rescue --background --write "migrate the database schema"
+/codex:rescue --background "migrate the database schema"
 
 # Resume last conversation
 /codex:rescue --resume "continue the previous task"
@@ -132,7 +130,7 @@ plugins/
     scripts/                        Companion scripts
   codex/                            Codex plugin (OpenAI)
     .claude-plugin/plugin.json      Plugin manifest
-    commands/                       8 slash commands (including execute-plan)
+    commands/                       9 slash commands (including execute-plan)
     agents/codex-rescue.md          Auto-delegation subagent
     skills/                         GPT-5.4 prompting, result handling
     scripts/                        Codex companion scripts

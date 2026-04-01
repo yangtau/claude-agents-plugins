@@ -815,7 +815,7 @@ function handleModel(argv) {
     const lines = ["## Codex Model Defaults", ""];
     if (defaultModel) {
       lines.push(
-        `Workspace default: **${defaultModel}** (used when \`--model\` is omitted on \`/codex:task\`).`
+        `Workspace default: **${defaultModel}** (used when \`--model\` is omitted on \`/codex:rescue\`).`
       );
     } else {
       lines.push(
@@ -829,7 +829,7 @@ function handleModel(argv) {
     }
     lines.push("");
     lines.push("Override for a single run:");
-    lines.push("  `/codex:task --model spark \"your prompt\"`");
+    lines.push("  `/codex:rescue --model spark \"your prompt\"`");
     outputResult(`${lines.join("\n")}\n`, false);
     return;
   }
@@ -843,7 +843,7 @@ function handleModel(argv) {
   const rendered = [
     `Set **${modelId}** as the default model for this workspace.`,
     "",
-    "Future `/codex:task` runs use this model when `--model` is not specified.",
+    "Future `/codex:rescue` runs use this model when `--model` is not specified.",
     ""
   ].join("\n");
   outputCommandResult(payload, `${rendered}\n`, options.json);

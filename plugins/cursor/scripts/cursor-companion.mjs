@@ -7,7 +7,7 @@ import process from "node:process";
 import { fileURLToPath } from "node:url";
 
 import { parseArgs, splitRawArgumentString } from "./lib/args.mjs";
-import { getCursorAvailability, getCursorLoginStatus, runCursorAgent } from "./lib/cursor.mjs";
+import { createCursorChat, getCursorAvailability, getCursorLoginStatus, runCursorAgent } from "./lib/cursor.mjs";
 import {
   buildSingleJobSnapshot,
   buildStatusSnapshot,
@@ -46,13 +46,14 @@ import {
   createJobProgressUpdater,
   createProgressReporter,
   runTrackedJob,
-  appendLogBlock,
 } from "./lib/tracked-jobs.mjs";
 import { resolveWorkspaceRoot } from "./lib/workspace.mjs";
 
 const ROOT_DIR = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 const DEFAULT_STATUS_WAIT_TIMEOUT_MS = 240000;
 const DEFAULT_STATUS_POLL_INTERVAL_MS = 2000;
+const DEFAULT_CONTINUE_PROMPT =
+  "Continue from the current thread state. Pick the next highest-value step and follow through until the task is resolved.";
 
 // ── Helpers ──
 
@@ -61,10 +62,11 @@ function printUsage() {
     [
       "Usage:",
       "  cursor-companion setup [--json]",
-      "  cursor-companion task [--background] [--write] [--model <model>] [--mode plan|ask] [prompt]",
+      "  cursor-companion task [--background] [--write] [--resume-last|--resume|--fresh] [--model <model>] [--mode plan|ask] [prompt]",
       "  cursor-companion review [--model <model>] [focus text]",
       "  cursor-companion status [job-id] [--wait] [--timeout-ms <ms>] [--all] [--json]",
       "  cursor-companion result [job-id] [--json]",
+      "  cursor-companion task-resume-candidate [--json]",
       "  cursor-companion model [<model-id>] [--clear] [--json]",
       "  cursor-companion cancel [job-id] [--json]",
     ].join("\n")
@@ -113,6 +115,10 @@ function shorten(text, limit = 96) {
     .replace(/\s+/g, " ");
   if (!normalized) return "";
   return normalized.length <= limit ? normalized : `${normalized.slice(0, limit - 3)}...`;
+}
+
+function isActiveJobStatus(status) {
+  return status === "queued" || status === "running";
 }
 
 function ensureCursorReady() {
@@ -181,6 +187,120 @@ async function waitForSingleJobSnapshot(cwd, reference, options = {}) {
   };
 }
 
+async function resolveLatestTrackedTaskChat(cwd, options = {}) {
+  const workspaceRoot = resolveWorkspaceRoot(cwd);
+  const jobs = sortJobsNewestFirst(listJobs(workspaceRoot)).filter((job) => job.id !== options.excludeJobId);
+  const activeTask = jobs.find((job) => job.jobClass === "task" && isActiveJobStatus(job.status));
+  if (activeTask) {
+    throw new Error(`Task ${activeTask.id} is still running. Use /cursor:status before continuing it.`);
+  }
+
+  const trackedTask = jobs.find((job) => job.jobClass === "task" && !isActiveJobStatus(job.status) && job.chatId);
+  if (trackedTask) {
+    return { id: trackedTask.chatId };
+  }
+
+  return null;
+}
+
+function readTaskPrompt(cwd, options, positionals) {
+  if (options["prompt-file"]) {
+    return fs.readFileSync(path.resolve(cwd, options["prompt-file"]), "utf8");
+  }
+  return positionals.join(" ");
+}
+
+function requireTaskRequest(prompt, resumeLast) {
+  if (!prompt && !resumeLast) {
+    throw new Error("Provide a prompt for the task, a prompt file, or use --resume-last.");
+  }
+}
+
+function buildTaskRunMetadata({ prompt, resumeLast = false }) {
+  const title = resumeLast ? "Cursor Agent Resume" : "Cursor Agent Task";
+  const fallbackSummary = resumeLast ? DEFAULT_CONTINUE_PROMPT : "Task";
+  return {
+    title,
+    summary: shorten(prompt || fallbackSummary),
+  };
+}
+
+function renderQueuedTaskLaunch(payload) {
+  return `${payload.title} started in the background as ${payload.jobId}. Check /cursor:status ${payload.jobId} for progress.\n`;
+}
+
+async function resolveTaskChatId(request) {
+  if (request.resumeLast) {
+    const latestChat = await resolveLatestTrackedTaskChat(request.cwd, {
+      excludeJobId: request.jobId,
+    });
+    if (!latestChat) {
+      throw new Error("No previous Cursor task chat was found for this repository.");
+    }
+    request.onProgress?.({
+      message: `Resuming Cursor chat ${latestChat.id}.`,
+      phase: "starting",
+      chatId: latestChat.id,
+    });
+    return latestChat.id;
+  }
+
+  const createdChat = createCursorChat({ cwd: resolveWorkspaceRoot(request.cwd) });
+  request.onProgress?.({
+    message: `Created Cursor chat ${createdChat.chatId}.`,
+    phase: "starting",
+    chatId: createdChat.chatId,
+  });
+  return createdChat.chatId;
+}
+
+async function executeTaskRun(request) {
+  const workspaceRoot = resolveWorkspaceRoot(request.cwd);
+  ensureCursorReady();
+
+  const taskMetadata = buildTaskRunMetadata({
+    prompt: request.prompt,
+    resumeLast: request.resumeLast,
+  });
+  const chatId = await resolveTaskChatId(request);
+  const prompt = request.prompt || DEFAULT_CONTINUE_PROMPT;
+
+  request.onProgress?.({
+    message: `${request.resumeLast ? "Resuming" : "Running"} task: ${shorten(prompt, 60)}`,
+    phase: "running",
+    chatId,
+  });
+
+  const result = await runCursorAgent({
+    prompt,
+    workspace: workspaceRoot,
+    model: request.model,
+    chatId,
+    mode: request.mode,
+    write: request.write,
+    outputFormat: "text",
+    onData: request.onData,
+  });
+
+  const rendered = renderTaskResult(result, {
+    title: taskMetadata.title,
+    jobId: request.jobId,
+  });
+
+  return {
+    exitStatus: result.status,
+    chatId,
+    payload: {
+      stdout: result.stdout,
+      stderr: result.stderr,
+      prompt,
+      chatId,
+    },
+    rendered,
+    summary: taskMetadata.summary,
+  };
+}
+
 // ── Setup ──
 
 function handleSetup(argv) {
@@ -215,7 +335,7 @@ function handleSetup(argv) {
 async function handleTask(argv) {
   const { options, positionals } = parseCommandInput(argv, {
     valueOptions: ["model", "mode", "cwd", "prompt-file"],
-    booleanOptions: ["json", "write", "background", "wait"],
+    booleanOptions: ["json", "write", "background", "wait", "resume-last", "resume", "fresh"],
     aliasMap: { m: "model" },
   });
 
@@ -224,17 +344,17 @@ async function handleTask(argv) {
   ensureCursorReady();
 
   const effectiveModel = options.model ?? getDefaultModelForWorkspace(workspaceRoot) ?? undefined;
-
-  // Read prompt
-  let prompt;
-  if (options["prompt-file"]) {
-    prompt = fs.readFileSync(path.resolve(cwd, options["prompt-file"]), "utf8");
-  } else {
-    prompt = positionals.join(" ");
+  const prompt = readTaskPrompt(cwd, options, positionals);
+  const resumeLast = Boolean(options["resume-last"] || options.resume);
+  const fresh = Boolean(options.fresh);
+  if (resumeLast && fresh) {
+    throw new Error("Choose either --resume/--resume-last or --fresh.");
   }
-  if (!prompt) {
-    throw new Error("Provide a prompt for the task.");
-  }
+  requireTaskRequest(prompt, resumeLast);
+  const taskMetadata = buildTaskRunMetadata({
+    prompt,
+    resumeLast,
+  });
 
   const jobId = generateJobId("task");
   const jobRecord = createJobRecord({
@@ -242,12 +362,12 @@ async function handleTask(argv) {
     kind: "task",
     jobClass: "task",
     status: "queued",
-    summary: shorten(prompt),
+    title: taskMetadata.title,
+    summary: taskMetadata.summary,
     write: Boolean(options.write),
   });
 
   if (options.background) {
-    // Background execution: spawn detached worker
     upsertJob(workspaceRoot, jobRecord);
 
     const scriptPath = path.join(ROOT_DIR, "scripts", "cursor-companion.mjs");
@@ -272,18 +392,15 @@ async function handleTask(argv) {
       model: effectiveModel,
       mode: options.mode ?? undefined,
       write: Boolean(options.write),
+      resumeLast,
     });
 
-    const payload = { jobId, status: "queued", summary: jobRecord.summary };
-    outputResult(
-      options.json ? payload : `Cursor Agent task started in the background as ${jobId}. Check /cursor:status ${jobId} for progress.\n`,
-      options.json
-    );
+    const payload = { jobId, status: "queued", title: taskMetadata.title, summary: jobRecord.summary };
+    outputResult(options.json ? payload : renderQueuedTaskLaunch(payload), options.json);
     return;
   }
 
-  // Foreground execution via tracked job
-  const logFile = createJobLogFile(workspaceRoot, jobId, "Cursor Agent task");
+  const logFile = createJobLogFile(workspaceRoot, jobId, taskMetadata.title);
   const progressUpdater = createJobProgressUpdater(workspaceRoot, jobId);
   const progressReporter = createProgressReporter({
     stderr: true,
@@ -298,25 +415,17 @@ async function handleTask(argv) {
   };
 
   const execution = await runTrackedJob(job, async () => {
-    progressReporter?.({ message: `Running task: ${shorten(prompt, 60)}`, phase: "running" });
-
-    const result = await runCursorAgent({
+    return executeTaskRun({
+      cwd,
       prompt,
-      workspace: workspaceRoot,
       model: effectiveModel,
       mode: options.mode ?? undefined,
       write: Boolean(options.write),
-      outputFormat: "text",
+      resumeLast,
+      jobId,
+      onProgress: progressReporter,
       onData: (text) => process.stderr.write(text),
     });
-
-    const rendered = renderTaskResult(result, { title: "Cursor Agent Task", jobId });
-    return {
-      exitStatus: result.status,
-      payload: { stdout: result.stdout, stderr: result.stderr, prompt },
-      rendered,
-      summary: shorten(prompt),
-    };
   }, { logFile });
 
   outputResult(
@@ -350,7 +459,7 @@ async function handleTaskWorker(argv) {
     throw new Error(`No stored job found for ${options["job-id"]}.`);
   }
 
-  const logFile = createJobLogFile(workspaceRoot, stored.id, "Cursor Agent background task");
+  const logFile = createJobLogFile(workspaceRoot, stored.id, stored.title ?? "Cursor Agent background task");
   const progressUpdater = createJobProgressUpdater(workspaceRoot, stored.id);
   const progressReporter = createProgressReporter({
     logFile,
@@ -363,26 +472,16 @@ async function handleTaskWorker(argv) {
     logFile,
   };
 
-  await runTrackedJob(job, async () => {
-    progressReporter?.({ message: "Running background task", phase: "running" });
-
-    const result = await runCursorAgent({
-      prompt: stored.prompt,
-      workspace: workspaceRoot,
-      model: stored.model ?? undefined,
-      mode: stored.mode ?? undefined,
-      write: Boolean(stored.write),
-      outputFormat: "text",
-    });
-
-    const rendered = renderTaskResult(result, { title: "Cursor Agent Task", jobId: stored.id });
-    return {
-      exitStatus: result.status,
-      payload: { stdout: result.stdout, stderr: result.stderr },
-      rendered,
-      summary: stored.summary,
-    };
-  }, { logFile });
+  await runTrackedJob(job, () => executeTaskRun({
+    cwd,
+    prompt: stored.prompt,
+    model: stored.model ?? undefined,
+    mode: stored.mode ?? undefined,
+    write: Boolean(stored.write),
+    resumeLast: Boolean(stored.resumeLast),
+    jobId: stored.id,
+    onProgress: progressReporter,
+  }), { logFile });
 }
 
 // ── Review ──
@@ -539,6 +638,48 @@ function handleResult(argv) {
   outputResult(options.json ? { job, stored } : renderStoredJobResult(job, stored), options.json);
 }
 
+function handleTaskResumeCandidate(argv) {
+  const { options } = parseCommandInput(argv, {
+    valueOptions: ["cwd"],
+    booleanOptions: ["json"],
+  });
+
+  const cwd = resolveCommandCwd(options);
+  const workspaceRoot = resolveCommandWorkspace(options);
+  const sessionId = process.env[SESSION_ID_ENV] ?? null;
+  const jobs = sortJobsNewestFirst(listJobs(workspaceRoot));
+  const candidate =
+    jobs.find(
+      (job) =>
+        job.jobClass === "task" &&
+        job.chatId &&
+        !isActiveJobStatus(job.status) &&
+        (!sessionId || job.sessionId === sessionId)
+    ) ?? null;
+
+  const payload = {
+    available: Boolean(candidate),
+    sessionId,
+    candidate:
+      candidate == null
+        ? null
+        : {
+            id: candidate.id,
+            status: candidate.status,
+            title: candidate.title ?? null,
+            summary: candidate.summary ?? null,
+            chatId: candidate.chatId,
+            completedAt: candidate.completedAt ?? null,
+            updatedAt: candidate.updatedAt ?? null,
+          },
+  };
+
+  const rendered = candidate
+    ? `Resumable task found: ${candidate.id} (${candidate.status}).\n`
+    : "No resumable task found for this session.\n";
+  outputResult(options.json ? payload : rendered, options.json);
+}
+
 // ── Model (list + workspace default) ──
 
 async function handleModel(argv) {
@@ -579,7 +720,7 @@ async function handleModel(argv) {
     lines.push("\n---");
     if (defaultModel) {
       lines.push(
-        `Workspace default: **${defaultModel}** (used when \`--model\` is omitted on \`/cursor:task\` and \`/cursor:review\`).`
+        `Workspace default: **${defaultModel}** (used when \`--model\` is omitted on \`/cursor:rescue\` and \`/cursor:review\`).`
       );
     } else {
       lines.push(
@@ -587,7 +728,7 @@ async function handleModel(argv) {
       );
     }
     lines.push("\nOverride for a single run:");
-    lines.push("  `/cursor:task --model grok-4-20 \"your prompt\"`");
+    lines.push("  `/cursor:rescue --model grok-4-20 \"your prompt\"`");
     outputResult(lines.join("\n") + "\n", false);
     return;
   }
@@ -606,7 +747,7 @@ async function handleModel(argv) {
   const text = [
     `Set **${modelId}** (${found.name}) as the default model for this workspace.`,
     "",
-    "Future `/cursor:task` and `/cursor:review` runs use this model when `--model` is not specified.",
+    "Future `/cursor:rescue` and `/cursor:review` runs use this model when `--model` is not specified.",
     "",
   ].join("\n");
   outputResult(options.json ? payload : text + "\n", options.json);
@@ -676,6 +817,9 @@ async function main() {
       break;
     case "result":
       handleResult(argv);
+      break;
+    case "task-resume-candidate":
+      handleTaskResumeCandidate(argv);
       break;
     case "model":
       await handleModel(argv);

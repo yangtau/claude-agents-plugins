@@ -1,18 +1,27 @@
-import { spawn } from "node:child_process";
-import { execFileSync } from "node:child_process";
+import { spawn, execFileSync, spawnSync } from "node:child_process";
+
+function stripAnsi(text) {
+  return String(text ?? "").replace(/\x1b\[[0-9;]*[A-Za-z]|\x1b\].*?\x07/g, "");
+}
+
+function extractChatId(text) {
+  const match = String(text ?? "").match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
+  return match ? match[0] : null;
+}
 
 /**
  * Check if cursor-agent is available and get version info.
  */
 export function getCursorAvailability() {
   try {
-    const result = execFileSync("cursor-agent", ["about"], {
+    const result = execFileSync("cursor-agent", ["--version"], {
       encoding: "utf8",
       timeout: 15000,
       stdio: ["ignore", "pipe", "pipe"],
     });
-    const versionMatch = result.match(/Version:\s*(.+)/i) || result.match(/(\d{4}\.\d{2}\.\d{2}[^\s]*)/);
-    const detail = versionMatch ? versionMatch[1].trim() : result.trim().split("\n")[0];
+    const clean = stripAnsi(result).trim();
+    const versionMatch = clean.match(/(\d{4}\.\d{2}\.\d{2}[^\s]*)/);
+    const detail = versionMatch ? versionMatch[1].trim() : clean.split("\n")[0];
     return { available: true, detail };
   } catch {
     return { available: false, detail: "cursor-agent not found" };
@@ -31,9 +40,41 @@ export function getCursorLoginStatus() {
     });
     const loggedIn = /logged in|authenticated|email/i.test(result);
     return { available: true, loggedIn, detail: loggedIn ? "authenticated" : "not authenticated" };
-  } catch {
-    return { available: false, loggedIn: false, detail: "cursor-agent not found" };
+  } catch (error) {
+    if (error && typeof error === "object" && error.code === "ENOENT") {
+      return { available: false, loggedIn: false, detail: "cursor-agent not found" };
+    }
+
+    const stdout = typeof error?.stdout === "string" ? stripAnsi(error.stdout).trim() : "";
+    const stderr = typeof error?.stderr === "string" ? stripAnsi(error.stderr).trim() : "";
+    const detail = [stdout, stderr].filter(Boolean).join(" ").trim() || "not authenticated";
+    return { available: true, loggedIn: false, detail };
   }
+}
+
+export function createCursorChat(options = {}) {
+  const result = spawnSync("cursor-agent", ["create-chat"], {
+    cwd: options.cwd,
+    encoding: "utf8",
+    timeout: options.timeout ?? 30000,
+    stdio: ["ignore", "pipe", "pipe"],
+    env: { ...process.env, ...(options.env ?? {}) },
+  });
+
+  const stdout = result.stdout ?? "";
+  const stderr = result.stderr ?? "";
+  const chatId = extractChatId(stdout);
+  if (!chatId) {
+    const detail = [stdout, stderr, result.error?.message ?? ""].filter(Boolean).join("\n").trim();
+    throw new Error(detail || "Failed to create a Cursor chat.");
+  }
+
+  return {
+    chatId,
+    stdout: stdout.trim(),
+    stderr: stderr.trim(),
+    status: result.status ?? 0,
+  };
 }
 
 /**
@@ -45,6 +86,7 @@ export function runCursorAgent(options = {}) {
     prompt,
     workspace,
     model,
+    chatId,
     mode, // "plan", "ask", or undefined (default agent mode)
     write = false,
     outputFormat = "text",
@@ -53,7 +95,13 @@ export function runCursorAgent(options = {}) {
   } = options;
 
   return new Promise((resolve, reject) => {
-    const args = ["-p", "--trust"];
+    const args = [];
+
+    if (chatId) {
+      args.push("--resume", chatId);
+    }
+
+    args.push("-p", "--trust");
 
     if (write) {
       args.push("--yolo");
@@ -112,6 +160,7 @@ export function runCursorAgent(options = {}) {
         status: code ?? 0,
         stdout: stdout.trim(),
         stderr: stderr.trim(),
+        chatId: chatId ?? null,
       });
     });
 

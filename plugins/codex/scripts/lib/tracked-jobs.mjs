@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import process from "node:process";
 
-import { readJobFile, resolveJobFile, resolveJobLogFile, upsertJob, writeJobFile } from "./state.mjs";
+import { JOB_SOURCE, readJobFile, resolveJobFile, resolveJobLogFile, upsertJob, writeJobFile } from "./state.mjs";
 
 export const SESSION_ID_ENV = "CODEX_COMPANION_SESSION_ID";
 
@@ -62,6 +62,7 @@ export function createJobRecord(base, options = {}) {
   const sessionId = env[options.sessionIdEnv ?? SESSION_ID_ENV];
   return {
     ...base,
+    source: options.source ?? base.source ?? JOB_SOURCE,
     createdAt: nowIso(),
     ...(sessionId ? { sessionId } : {})
   };

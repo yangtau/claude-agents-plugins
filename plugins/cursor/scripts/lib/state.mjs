@@ -8,9 +8,12 @@ import { resolveWorkspaceRoot } from "./workspace.mjs";
 const STATE_VERSION = 1;
 const PLUGIN_DATA_ENV = "CLAUDE_PLUGIN_DATA";
 const FALLBACK_STATE_ROOT_DIR = path.join(os.tmpdir(), "cursor-companion");
+const STATE_NAMESPACE = "cursor";
 const STATE_FILE_NAME = "state.json";
 const JOBS_DIR_NAME = "jobs";
 const MAX_JOBS = 50;
+
+export const JOB_SOURCE = STATE_NAMESPACE;
 
 function nowIso() {
   return new Date().toISOString();
@@ -37,8 +40,15 @@ export function resolveStateDir(cwd) {
   const slug = slugSource.replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "workspace";
   const hash = createHash("sha256").update(canonicalWorkspaceRoot).digest("hex").slice(0, 16);
   const pluginDataDir = process.env[PLUGIN_DATA_ENV];
-  const stateRoot = pluginDataDir ? path.join(pluginDataDir, "state") : FALLBACK_STATE_ROOT_DIR;
+  const stateRoot = pluginDataDir ? path.join(pluginDataDir, "state", STATE_NAMESPACE) : FALLBACK_STATE_ROOT_DIR;
   return path.join(stateRoot, `${slug}-${hash}`);
+}
+
+export function isOwnJob(job) {
+  if (!job || typeof job !== "object" || Array.isArray(job)) {
+    return false;
+  }
+  return job.source == null || job.source === JOB_SOURCE;
 }
 
 export function resolveStateFile(cwd) {
@@ -145,7 +155,7 @@ export function upsertJob(cwd, jobPatch) {
 }
 
 export function listJobs(cwd) {
-  return loadState(cwd).jobs;
+  return loadState(cwd).jobs.filter(isOwnJob);
 }
 
 export function setConfig(cwd, key, value) {
